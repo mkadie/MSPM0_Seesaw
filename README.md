@@ -9,6 +9,12 @@ adds a small custom **EVENT** module (an ordered, buffered button-event FIFO).
 It's exercised here from an **Adafruit Fruit Jam (RP2350B)** host over I²C, and
 flashed over SWD using the **XDS110** debug probe on an MSP-EXP432P401R LaunchPad.
 
+> **A note (and apology) on the docs:** a lot of the documentation in this repo
+> is computer-assisted / AI-generated. I'm busy across a number of projects, and
+> honestly I'm a lot better at *making* things than at *telling people about*
+> them — so I leaned on tooling to get this written down at all. If something
+> reads oddly or turns out to be wrong, trust the code; issues and PRs welcome.
+
 ## Why this exists
 
 This firmware is **based on Adafruit's seesaw ATtiny1616 firmware**
