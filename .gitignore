@@ -1,0 +1,15 @@
+# build artifacts
+build/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*_pad.hex
+
+# editor / OS
+*.swp
+.DS_Store
+
+# CircuitPython bytecode
+*.mpy
