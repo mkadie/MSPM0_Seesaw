@@ -68,6 +68,32 @@ OPTIONS=0x07, SELFTEST=0x55, INTFLAG=0x3F, EVENT POP_ALL=[0xFE,0xED]. **SELFTEST
   Test 1 = FJ drives / seesaw reads over I2C; Test 2 = seesaw drives over I2C / FJ reads.
   (Note: D10 lands on a spare pin, not a button.)
 
+### Bring-up resolved (2026-05-30) — 8 buttons, BTN1/A4 re-enabled, power conflict found
+
+8. **Eight buttons now (0..7).** Buttons 6/7 were added on **PA9/PA8** (PINCM20/19), which
+   meant **dropping the debug UART** (it lived on those pins). `BTN_MASK` and the IRQ
+   polarity setup cover bits 0..7; `HOST_WRITABLE_MASK` widened to `0x0001F8FF` (logical
+   bits 0..7 and 11..16).
+9. **Button 1 (PA26 = A4) is now a real button.** It had been *excluded* (input, no pull,
+   no IRQ) because on this board A4 doubled as **FULL_POWER**, held low by an external
+   pull-down — a pull-up would have fought it. FULL_POWER is now controlled elsewhere and
+   A4 is just an input, so BTN1 was restored to the normal button treatment (internal
+   pull-up + falling-edge IRQ, in `BTN_MASK`). Confirmed: pressing the A4 switch emits a
+   `SEESAW button 1` event, and the Fruit-Jam-side A4 monitor sees the same net toggle.
+   *Caveat:* the old external A4 pull-down must be removed, or it fights the pull-ups and
+   pins A4 low (BTN1 reads stuck-pressed).
+10. **Seesaw vs. LCD share the switched 3V3 rail — power, not wiring.** The biggest
+    bring-up red herring: with the ILI9341 LCD plugged in, `scan` showed only `0x18` and
+    never `0x49`. Root cause is **power**: the LCD and the seesaw both hang off the
+    FULL_POWER / 3V3_SWITCHED rail (fed via the hardwired pull-down), and the LCD's draw
+    **browns out the seesaw** so it never enumerates. Unplug the LCD (or power the seesaw
+    independently) → red LED on, `scan = ['0x18','0x49']`, `HW_ID = 0x84` rock-solid on
+    every pass. **The firmware was fine the whole time.** Next board must give the seesaw
+    its own always-on 3V3 (see §8).
+11. **Host-side test mode** (`fruit_jam/button_test.py`, gated by `test_mode = true` in the
+    AAC `config.txt`): shows seesaw EVENT presses, the Fruit Jam onboard buttons, and a
+    live **A4 line monitor** on the display + REPL — the working bring-up/diagnostic tool.
+
 ---
 
 ## 1. Goals
@@ -240,3 +266,43 @@ firmware/mspm0/
 3. **NONMAIN** — do we need to touch NONMAIN at all for this app? Probably not (default settings give us SWD access and a stock BSL that we don't need). Confirm before shipping.
 4. **Linker script** — write our own minimal one or pull from MSPM0-SDK. Decide based on toolchain we settle on.
 5. **CAN-FD** — the FR2311 had no CAN. The MSPM0G3507 does, and the schematic exposes CAN_TX (PA12/PA26) / CAN_RX (PA13/PA27) on the SEESAW headers. Out of scope for v1 but worth flagging — the spare GPIO labels "12"/"13" on SEESAW_RIGHT 8/9 can be repurposed as a CAN bus later without a board spin.
+
+---
+
+## 8. Next version — runtime-configurable, ATtiny1616-Seesaw-style
+
+**Design goal for the next firmware/PCB revision: stop hard-coding the pin roles.**
+This bring-up showed how much friction comes from baking choices into the firmware —
+which pins are buttons vs. spare, whether a pin has a pull-up, that A4 was FULL_POWER and
+therefore *not* a button (had to be re-flashed when that changed), etc. Every such change
+meant editing C and re-flashing over SWD.
+
+The next version should be **configurable at runtime over I2C, the way Adafruit's
+ATtiny1616 Seesaw is** — the host (CircuitPython on the Fruit Jam) decides each pin's role
+and changes it live, with no re-flash. Concretely:
+
+1. **Every GPIO host-configurable via the standard Seesaw GPIO module.** Direction
+   (`DIRSET`/`DIRCLR`), pulls (`PULLENSET`/`PULLENCLR` + `BULK_SET`/`BULK_CLR` to pick
+   up/down), and interrupt enable (`INTENSET`/`INTENCLR`) for *any* pin — not a fixed
+   "buttons 0..5/0..7" set. A pin becomes "a button" simply because the host enabled its
+   edge interrupt; it becomes an output because the host set its direction. Mirrors the
+   ATtiny1616 Seesaw GPIO API so the stock `adafruit_seesaw` library Just Works.
+2. **No firmware-side privileged pins beyond the truly fixed ones** (I2C SDA/SCL, SWD,
+   the on-board LED). Drop the hard-coded `BTN_MASK` / `HOST_WRITABLE_MASK` button list;
+   replace with a host-writable per-pin config so cases like "A4 is FULL_POWER, not a
+   button" or "A4 is now a button" are a CircuitPython config change, never a re-flash.
+3. **Persistable profile (optional).** Let the host push a pin-role profile that the
+   firmware can optionally save (NONMAIN/flash) and reload on boot, so a given assistive
+   build comes up in its configured state without the host re-applying it every power-on.
+4. **Why this matters — special-needs cases.** Each AAC / assistive user can need a
+   different switch layout: different counts of buttons, different active-low vs.
+   active-high switches, latching vs. momentary, some pins as outputs driving indicator
+   LEDs, debounce/long-press timing, etc. Making all of that **CircuitPython-settable at
+   runtime** means one firmware image adapts to every user's hardware and needs — the
+   support person configures it from the Fruit Jam side instead of rebuilding firmware.
+5. **Carry over the good parts of v1:** keep the custom `EVENT` FIFO module (0x80) for
+   ordered press history, the host-abort-safe I2C target ISR, and `HW_ID = 0x84`. Add
+   host-settable debounce and optional per-pin event-vs-latch behaviour.
+6. **Hardware prerequisite (from §0.10):** give the seesaw its own **always-on 3V3** rail,
+   independent of the LCD's switched rail, so it's always enumerable regardless of display
+   state. Runtime config is useless if the chip browns out.
