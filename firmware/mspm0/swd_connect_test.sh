@@ -2,7 +2,7 @@
 # Quick XDS110 -> TC2030 -> MSPM0G3507 SWD connect test.
 # Success = it prints 16 bytes of flash. Failure = "Error connecting to the target".
 set -u
-UF="${UNIFLASH_DIR:-$HOME/ti/uniflash_9.3.0}"
+UF=~/ti/uniflash_9.3.0
 CCXML=$UF/deskdb/content/TICloudAgent/linux/scripting/examples/debugger/mspm0g3507/mspm0g3507.ccxml
 OUT=/tmp/m0read.bin
 rm -f "$OUT"

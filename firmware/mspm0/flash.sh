@@ -10,7 +10,7 @@
 #   - Erases, programs, verifies, then releases reset so the firmware runs.
 set -u
 ELF="${1:-$(dirname "$0")/build/firmware.elf}"
-UF="${UNIFLASH_DIR:-$HOME/ti/uniflash_9.3.0}"
+UF=~/ti/uniflash_9.3.0
 CCXML=$UF/deskdb/content/TICloudAgent/linux/scripting/examples/debugger/mspm0g3507/mspm0g3507.ccxml
 XRDIR=$UF/deskdb/content/TICloudAgent/linux/ccs_base/common/uscif/xds110
 export LD_LIBRARY_PATH="$XRDIR:$UF/deskdb/content/TICloudAgent/linux/ccs_base/common/uscif:${LD_LIBRARY_PATH:-}"

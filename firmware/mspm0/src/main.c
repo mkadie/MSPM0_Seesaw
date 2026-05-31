@@ -48,23 +48,25 @@
 #define NLOGBITS 17
 static const uint8_t logbit_dio[NLOGBITS] = {
     BTN0_DIO, BTN1_DIO, BTN2_DIO, BTN3_DIO, BTN4_DIO, BTN5_DIO, /* 0..5 */
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               /* 6..10 */
+    BTN6_DIO, BTN7_DIO,                                         /* 6,7 (PA9/PA8) */
+    0xFF, 0xFF, 0xFF,                                           /* 8..10 */
     SP11_DIO, SP12_DIO, SP13_DIO, SP14_DIO, SP15_DIO, SP16_DIO, /* 11..16 */
 };
 /* PINCM per spare logical bit (for pull-enable); buttons not host-writable. */
 static const uint8_t sp_pincm[NLOGBITS] = {
     0,0,0,0,0,0, 0,0,0,0,0, 40,34,35,36,37,38,
 };
-/* Host-writable logical bits: spare 11..16 AND buttons 0..5. Buttons default to
+/* Host-writable logical bits: spare 11..16 AND buttons 0..7. Buttons default to
  * firmware-managed inputs, but the host may reconfigure them as outputs (needed
  * for the FJ<->seesaw loopback test and general Seesaw-GPIO flexibility). */
-#define HOST_WRITABLE_MASK 0x0001F83Fu  /* logical bits 0..5 and 11..16 */
+#define HOST_WRITABLE_MASK 0x0001F8FFu  /* logical bits 0..7 and 11..16 */
 
-/* button DIO -> human index 0..5 for the event FIFO */
+/* button DIO -> human index 0..7 for the event FIFO */
 static uint8_t btn_dio_to_index(uint32_t dio) {
     switch (dio) {
     case BTN0_DIO: return 0; case BTN1_DIO: return 1; case BTN2_DIO: return 2;
     case BTN3_DIO: return 3; case BTN4_DIO: return 4; case BTN5_DIO: return 5;
+    case BTN6_DIO: return 6; case BTN7_DIO: return 7;
     default: return 0xFF;
     }
 }
@@ -99,33 +101,7 @@ static uint8_t evt_pop(void) {
 static inline void led_on(void)  { GPIOA->DOUTCLR31_0 = LED_BIT; }
 static inline void led_off(void) { GPIOA->DOUTSET31_0 = LED_BIT; }
 
-/* ====================================================================== */
-/* UART1 debug (TX-only, polled) @115200, BUSCLK=32MHz                    */
-/* ====================================================================== */
-static void uart_init(void) {
-    UART1->GPRCM.RSTCTL = RSTCTL_KEY | GPRCM_RESET;
-    UART1->GPRCM.PWREN  = PWREN_KEY  | GPRCM_ENABLE;
-    for (volatile int i = 0; i < 24; i++) { __asm__ volatile("nop"); }
-
-    /* PA8 = UART1.TX (PF2), PA9 = UART1.RX (PF2, input) */
-    PINCM(PINCM_PA8_TX) = PINCM_PC | PINCM_PF(PF_UART1);
-    PINCM(PINCM_PA9_RX) = PINCM_PC | PINCM_INENA | PINCM_PF(PF_UART1);
-
-    UART1->CTL0   = 0;                              /* disable while configuring */
-    UART1->CLKSEL = UART_CLKSEL_BUSCLK_SEL_ENABLE;  /* BUSCLK source */
-    UART1->CLKDIV = 0;
-    /* 115200 @ 32MHz, OVS16: div = 32e6/(16*115200)=17.361 -> IBRD=17 FBRD=23 */
-    UART1->IBRD = 17;
-    UART1->FBRD = 23;
-    UART1->LCRH = UART_LCRH_WLEN_DATABIT8;          /* 8N1 */
-    UART1->CTL0 = UART_CTL0_ENABLE_ENABLE | UART_CTL0_FEN_ENABLE
-                | UART_CTL0_TXE_ENABLE | UART_CTL0_RXE_ENABLE;
-}
-static void uart_putc(char c) {
-    while (UART1->STAT & UART_STAT_TXFF_MASK) { }
-    UART1->TXDATA = (uint8_t)c;
-}
-static void uart_puts(const char *s) { while (*s) uart_putc(*s++); }
+/* Debug UART dropped — PA8/PA9 are now button inputs (buttons 7/6). */
 
 /* ====================================================================== */
 /* GPIO init: LED output, buttons input+pullup+falling IRQ, spare input   */
@@ -140,25 +116,32 @@ static void gpio_init(void) {
     GPIOA->DOUTSET31_0 = LED_BIT;
     GPIOA->DOE31_0    |= LED_BIT;
 
-    /* Buttons: input + internal pull-up + GPIO function */
-    static const uint8_t btn_pincm[6] = { 60, 59, 55, 54, 47, 39 };
-    for (int i = 0; i < 6; i++) {
+    /* Buttons 0..7: input + internal pull-up + GPIO function.
+     * (buttons 6/7 = PA9/PA8 = PINCM20/19, ex-UART). */
+    static const uint8_t btn_pincm[8] = { 60, 59, 55, 54, 47, 39, 20, 19 };
+    for (int i = 0; i < 8; i++) {
         PINCM(btn_pincm[i]) = PINCM_PC | PINCM_INENA | PINCM_PIPU | PINCM_PF(PF_GPIO);
     }
+    /* PA26 (PINCM59 = A4) is now a normal button — the btn_pincm loop above
+     * already gave it input + internal pull-up. FULL_POWER is controlled
+     * elsewhere; if the old external A4 pull-down is still fitted it fights this
+     * pull-up, so it must be removed for BTN1 to read cleanly. */
     /* Spare "11".."16": input, no pull (host may reconfigure) */
     for (int b = 11; b <= 16; b++) {
         PINCM(sp_pincm[b]) = PINCM_PC | PINCM_INENA | PINCM_PF(PF_GPIO);
     }
 
-    /* Falling-edge detect on the six button DIOs (all in 31..16 range).
-     * POLARITY31_16: 2 bits per DIO, FALL = 0b10, field at (dio-16)*2. */
-    uint32_t pol = 0;
-    static const uint8_t btn_dio[6] =
+    /* Falling-edge detect (2 bits/DIO, FALL = 0b10).
+     * DIOs 17..27 live in POLARITY31_16 (field at (dio-16)*2);
+     * DIOs 8/9 (PA8/PA9) live in POLARITY15_0 (field at dio*2). */
+    uint32_t pol_hi = 0;
+    static const uint8_t btn_dio_hi[6] =   /* PA17..PA27 buttons (incl. BTN1/A4) */
         { BTN0_DIO, BTN1_DIO, BTN2_DIO, BTN3_DIO, BTN4_DIO, BTN5_DIO };
     for (int i = 0; i < 6; i++) {
-        pol |= (2u << ((btn_dio[i] - 16) * 2));
+        pol_hi |= (2u << ((btn_dio_hi[i] - 16) * 2));
     }
-    GPIOA->POLARITY31_16 = pol;
+    GPIOA->POLARITY31_16 = pol_hi;
+    GPIOA->POLARITY15_0  = (2u << (BTN6_DIO * 2)) | (2u << (BTN7_DIO * 2));
 
     GPIOA->CPU_INT.ICLR  = BTN_MASK;   /* clear any stale */
     GPIOA->CPU_INT.IMASK = BTN_MASK;   /* enable button interrupts */
@@ -184,7 +167,7 @@ static void gpio_apply(uint32_t logmask, int action) {
         uint32_t dio = logbit_dio[b];
         if (dio == 0xFF) continue;
         uint32_t m = (1u << dio);
-        int is_btn = (b <= 5);                          /* bits 0..5 have edge IRQs */
+        int is_btn = (b <= 7);                          /* bits 0..7 have edge IRQs */
         switch (action) {
         case 0: GPIOA->DOUTSET31_0 = m; break;          /* BULK_SET */
         case 1: GPIOA->DOUTCLR31_0 = m; break;          /* BULK_CLR */
@@ -355,14 +338,11 @@ void GPIOA_IRQHandler(void) {
 /* ====================================================================== */
 int main(void) {
     gpio_init();
-    uart_init();
     i2c_init();
 
     NVIC_enable(GPIOA_IRQn);
     NVIC_enable(I2C1_IRQn);
     enable_irq();
-
-    uart_puts("=== MSPM0 seesaw addr=0x49 buttons=0..5 (I2C1 PB2/PB3) ===\r\n");
 
     for (;;) { __wfi(); }
 }

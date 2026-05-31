@@ -66,15 +66,22 @@ static inline void enable_irq(void) { __asm__ volatile ("cpsie i"); }
 /* --- GPIOA bit positions (DIO numbers) ---------------------------------- */
 #define LED_BIT  (1U << 10)   /* PA10, active-low (drive 0 = lit) */
 
-/* Buttons "0".."5" -> GPIOA DIO + its PINCM (all on GPIOA, input pull-up). */
+/* Buttons "0".."7" -> GPIOA DIO + its PINCM (all on GPIOA, input pull-up).
+ * Buttons 6/7 reuse PA9/PA8 (formerly the debug UART) — UART dropped. */
 #define BTN0_DIO 27   /* PA27, PINCM60 */
 #define BTN1_DIO 26   /* PA26, PINCM59 */
 #define BTN2_DIO 25   /* PA25, PINCM55 */
 #define BTN3_DIO 24   /* PA24, PINCM54 */
 #define BTN4_DIO 22   /* PA22, PINCM47 */
 #define BTN5_DIO 17   /* PA17, PINCM39 */
-#define BTN_MASK ((1U<<BTN0_DIO)|(1U<<BTN1_DIO)|(1U<<BTN2_DIO)| \
-                  (1U<<BTN3_DIO)|(1U<<BTN4_DIO)|(1U<<BTN5_DIO))
+#define BTN6_DIO  9   /* PA9,  PINCM20 (ex-UART RX) */
+#define BTN7_DIO  8   /* PA8,  PINCM19 (ex-UART TX) */
+/* BTN1 (PA26 = A4) is now a normal button: FULL_POWER is controlled elsewhere
+ * and A4 is an input on this board, so BTN1 gets a pull-up + falling-edge IRQ
+ * like the others — see gpio_init(). (Requires the old A4 pull-down removed,
+ * else it fights the pull-up.) */
+#define BTN_MASK ((1U<<BTN0_DIO)|(1U<<BTN1_DIO)|(1U<<BTN2_DIO)|(1U<<BTN3_DIO)| \
+                  (1U<<BTN4_DIO)|(1U<<BTN5_DIO)|(1U<<BTN6_DIO)|(1U<<BTN7_DIO))
 
 /* Spare GPIO "11".."16" -> GPIOA DIO + PINCM (host-controllable). */
 #define SP11_DIO 18   /* PA18, PINCM40 */
