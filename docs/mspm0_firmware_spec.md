@@ -94,6 +94,41 @@ OPTIONS=0x07, SELFTEST=0x55, INTFLAG=0x3F, EVENT POP_ALL=[0xFE,0xED]. **SELFTEST
     AAC `config.txt`): shows seesaw EVENT presses, the Fruit Jam onboard buttons, and a
     live **A4 line monitor** on the display + REPL — the working bring-up/diagnostic tool.
 
+### Power design refined (2026-05-31) — it's a power-on-RESET problem, not steady-state
+
+12. **Root cause is the turn-on transient, not a steady-state brownout.** The seesaw now
+    has its **own 600 mA 3.3 V regulator** (measures 3.2 V at the chip, healthy). It boots
+    and runs the firmware fine with the LCD unplugged. With the LCD connected (and SWD /
+    Fruit Jam / TC2030 all *unplugged*, so the SWD nets are ruled out), the MSPM0 fails to
+    start: the **LCD backlight inrush on the shared switched rail dips VDD below the MSPM0
+    power-on-reset threshold during the ramp**. Steady-state is fine; the transient isn't.
+    **Tell-tale:** the button pull-ups read **~1 V** — that's a *symptom*, not a load:
+    `gpio_init()` never ran, so the internal pull-ups were never enabled (= firmware not
+    running = boot failed). When VDD is clean, `gpio_init()` runs and the nets sit at ~3.2 V.
+13. **Mitigation being bench-tested (week of 2026-06-07): a 1.5 mH series inductor on the
+    3.3 V and 5 V switched lines.** The board topology puts this right — the MSPM0 sits
+    **directly on the regulator output (upstream of the inductor)**; the LCD hangs off the
+    **downstream** side through a load-switch IC:
+
+    ```
+    Reg 3.3V ──┬── MSPM0 (small bulk + reg 10µF)      <- protected node (upstream)
+               │
+            [1.5mH]
+               │
+            [10µF] ── switch IC ──[10µF]── LCD         <- inrush lives here (downstream)
+    ```
+
+    The inductor **decouples the LCD inrush from the MSPM0 node**: the LCD's fast inrush is
+    supplied locally by the two downstream 10 µF caps, and the inductor only lets the
+    regulator refill them slowly (di/dt ≈ V/L ≈ 2 mA/µs), so the regulator node — where the
+    MSPM0 lives — sees a gentle slewed load, not a spike, and holds 3.3 V through POR.
+    Because the MSPM0 is *before* the inductor it's also shielded from any LC ringing.
+    **To verify on the bench:** (a) MSPM0 VDD rides flat at power-on (pass/fail); (b) the
+    downstream/LCD node doesn't *overshoot* past the switch-IC / LCD max (the 1.5 mH + 10 µF
+    is an undamped LC, Z₀≈12 Ω — add series damping or soft-start if it rings); (c) the
+    inductor's saturation current exceeds the LCD's running current and its DCR drop on the
+    LCD rail is acceptable.
+
 ---
 
 ## 1. Goals
@@ -303,6 +338,7 @@ and changes it live, with no re-flash. Concretely:
 5. **Carry over the good parts of v1:** keep the custom `EVENT` FIFO module (0x80) for
    ordered press history, the host-abort-safe I2C target ISR, and `HW_ID = 0x84`. Add
    host-settable debounce and optional per-pin event-vs-latch behaviour.
-6. **Hardware prerequisite (from §0.10):** give the seesaw its own **always-on 3V3** rail,
-   independent of the LCD's switched rail, so it's always enumerable regardless of display
-   state. Runtime config is useless if the chip browns out.
+6. **Hardware prerequisite (from §0.10/§0.12-13):** give the seesaw its own **always-on
+   3V3** rail (it now has a dedicated 600 mA regulator) and keep the MSPM0 **upstream of a
+   series inductor** that isolates the LCD's switched rail, so the LCD inrush can't sag VDD
+   through the MSPM0's power-on reset. Runtime config is useless if the chip browns out.
