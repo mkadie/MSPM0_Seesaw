@@ -3,6 +3,10 @@
  *
  * Adafruit-style Seesaw I2C peripheral. See mspm0_firmware_spec.md.
  * Modules: STATUS (0x00), GPIO (0x01), EVENT (0x80).
+ * GPIO is fully host-configurable at runtime via the standard Seesaw functions
+ * (DIRSET/CLR, BULK_SET/CLR/TOGGLE, PULLENSET/CLR, INTENSET/CLR, INTFLAG): a
+ * pin "is a button" only because the host armed its interrupt. Buttons 0..7 are
+ * armed at boot as a sensible default; the host can change any of it live.
  * I2C target @0x49 on I2C1 (PB2=SCL, PB3=SDA). Debug UART1 @115200 (PA8 TX).
  *
  * Bare-metal: register access via the SDK hw_*.h structs (see device.h).
@@ -27,6 +31,9 @@
 #define  FN_BULK        0x04u
 #define  FN_BULK_SET    0x05u
 #define  FN_BULK_CLR    0x06u
+#define  FN_BULK_TOGGLE 0x07u
+#define  FN_INTENSET    0x08u   /* host arms a pin's (falling-edge) interrupt  */
+#define  FN_INTENCLR    0x09u   /* host disarms a pin's interrupt             */
 #define  FN_INTFLAG     0x0Au
 #define  FN_PULLENSET   0x0Bu
 #define  FN_PULLENCLR   0x0Cu
@@ -35,15 +42,19 @@
 #define  FN_EVENT_POPALL 0x02u
 
 #define HW_ID_VALUE     0x84u
-#define VERSION_VALUE   0x00020100u
+#define VERSION_VALUE   0x00020200u   /* 0x0002.0200 — runtime-configurable GPIO/INTEN */
 #define OPTIONS_VALUE   0x00000007u
 #define SELFTEST_VALUE  0x55u
 #define SELFTEST_PATTERN 0x0000003Fu
 
 /* ====================================================================== */
-/* Logical host-GPIO bit map: bit -> GPIOA DIO (0xFF = unmapped)          */
-/* Buttons "0".."5" = bits 0..5 (read-only inputs).                       */
-/* Spare "11".."16" = bits 11..16 (host-writable).                        */
+/* Logical host-GPIO bit map: bit -> GPIOA DIO (0xFF = unmapped).          */
+/* Buttons "0".."7" = bits 0..7; spare "11".."16" = bits 11..16.           */
+/* Every mapped bit is fully host-configurable (direction / pull / output /  */
+/* interrupt) via the standard Seesaw GPIO module — a pin "is a button" only  */
+/* because the host armed its interrupt (INTENSET). The boot defaults just    */
+/* arm buttons 0..7 so they work out of the box; the host can change any of   */
+/* it at runtime (INTENCLR a button, INTENSET a spare, flip dir/pull, etc.).  */
 /* ====================================================================== */
 #define NLOGBITS 17
 static const uint8_t logbit_dio[NLOGBITS] = {
@@ -52,23 +63,42 @@ static const uint8_t logbit_dio[NLOGBITS] = {
     0xFF, 0xFF, 0xFF,                                           /* 8..10 */
     SP11_DIO, SP12_DIO, SP13_DIO, SP14_DIO, SP15_DIO, SP16_DIO, /* 11..16 */
 };
-/* PINCM per spare logical bit (for pull-enable); buttons not host-writable. */
-static const uint8_t sp_pincm[NLOGBITS] = {
-    0,0,0,0,0,0, 0,0,0,0,0, 40,34,35,36,37,38,
+/* PINCM index per logical bit (for pull-enable on ANY pin). 0 = unmapped. */
+static const uint8_t logbit_pincm[NLOGBITS] = {
+    60,59,55,54,47,39,  /* buttons 0..5 = PA27,PA26,PA25,PA24,PA22,PA17 */
+    20,19,              /* buttons 6,7  = PA9,PA8 */
+    0,0,0,              /* 8..10 unmapped */
+    40,34,35,36,37,38,  /* spares 11..16 = PA18,PA12,PA13,PA14,PA15,PA16 */
 };
-/* Host-writable logical bits: spare 11..16 AND buttons 0..7. Buttons default to
- * firmware-managed inputs, but the host may reconfigure them as outputs (needed
- * for the FJ<->seesaw loopback test and general Seesaw-GPIO flexibility). */
-#define HOST_WRITABLE_MASK 0x0001F8FFu  /* logical bits 0..7 and 11..16 */
+/* Host-writable logical bits: buttons 0..7 AND spare 11..16. */
+#define HOST_WRITABLE_MASK 0x0001F8FFu
 
-/* button DIO -> human index 0..7 for the event FIFO */
-static uint8_t btn_dio_to_index(uint32_t dio) {
-    switch (dio) {
-    case BTN0_DIO: return 0; case BTN1_DIO: return 1; case BTN2_DIO: return 2;
-    case BTN3_DIO: return 3; case BTN4_DIO: return 4; case BTN5_DIO: return 5;
-    case BTN6_DIO: return 6; case BTN7_DIO: return 7;
-    default: return 0xFF;
+/* DIOs whose edge interrupt is currently armed (host-controlled via
+ * INTENSET/INTENCLR; seeded to the button set at boot). The GPIOA ISR uses
+ * this instead of a hard-coded button mask, so ANY host-armed pin -> events. */
+static volatile uint32_t irq_dio_mask = 0;
+
+/* GPIOA DIO -> logical bit (0..16), or 0xFF if unmapped. */
+static uint8_t dio_to_logbit(uint32_t dio) {
+    for (int b = 0; b < NLOGBITS; b++)
+        if (logbit_dio[b] == dio) return (uint8_t)b;
+    return 0xFF;
+}
+
+/* Per-DIO edge config (2 bits/DIO; POLARITY15_0 for DIO 0..15, POLARITY31_16
+ * for 16..31). 0b10 = falling edge, 0b00 = disabled. */
+static void edge_set_falling(uint32_t dio) {
+    if (dio < 16) {
+        uint32_t sh = dio * 2;
+        GPIOA->POLARITY15_0 = (GPIOA->POLARITY15_0 & ~(3u << sh)) | (2u << sh);
+    } else {
+        uint32_t sh = (dio - 16) * 2;
+        GPIOA->POLARITY31_16 = (GPIOA->POLARITY31_16 & ~(3u << sh)) | (2u << sh);
     }
+}
+static void edge_clear(uint32_t dio) {
+    if (dio < 16) GPIOA->POLARITY15_0  &= ~(3u << (dio * 2));
+    else          GPIOA->POLARITY31_16 &= ~(3u << ((dio - 16) * 2));
 }
 
 /* ====================================================================== */
@@ -128,7 +158,7 @@ static void gpio_init(void) {
      * pull-up, so it must be removed for BTN1 to read cleanly. */
     /* Spare "11".."16": input, no pull (host may reconfigure) */
     for (int b = 11; b <= 16; b++) {
-        PINCM(sp_pincm[b]) = PINCM_PC | PINCM_INENA | PINCM_PF(PF_GPIO);
+        PINCM(logbit_pincm[b]) = PINCM_PC | PINCM_INENA | PINCM_PF(PF_GPIO);
     }
 
     /* Falling-edge detect (2 bits/DIO, FALL = 0b10).
@@ -145,6 +175,7 @@ static void gpio_init(void) {
 
     GPIOA->CPU_INT.ICLR  = BTN_MASK;   /* clear any stale */
     GPIOA->CPU_INT.IMASK = BTN_MASK;   /* enable button interrupts */
+    irq_dio_mask = BTN_MASK;           /* boot default; host edits via INTEN* */
 }
 
 /* ====================================================================== */
@@ -160,27 +191,41 @@ static uint32_t gpio_bulk_read(void) {
     return v;
 }
 /* Apply a logical-bit mask to GPIOA (set/clear output, or direction). */
+/* action: 0=BULK_SET 1=BULK_CLR 2=DIRSET 3=DIRCLR 4=PULLENSET 5=PULLENCLR
+ *         6=INTENSET 7=INTENCLR 8=BULK_TOGGLE */
 static void gpio_apply(uint32_t logmask, int action) {
-    logmask &= HOST_WRITABLE_MASK;     /* protect buttons + reserved pins */
+    logmask &= HOST_WRITABLE_MASK;     /* only touch mapped, host-writable bits */
     for (int b = 0; b < NLOGBITS; b++) {
         if (!(logmask & (1u << b))) continue;
         uint32_t dio = logbit_dio[b];
         if (dio == 0xFF) continue;
-        uint32_t m = (1u << dio);
-        int is_btn = (b <= 7);                          /* bits 0..7 have edge IRQs */
+        uint32_t m  = (1u << dio);
+        uint8_t  pc = logbit_pincm[b];
         switch (action) {
-        case 0: GPIOA->DOUTSET31_0 = m; break;          /* BULK_SET */
-        case 1: GPIOA->DOUTCLR31_0 = m; break;          /* BULK_CLR */
-        case 2: /* DIRSET (output): suppress this pin's button IRQ first */
-            if (is_btn) GPIOA->CPU_INT.IMASK &= ~m;
+        case 0: GPIOA->DOUTSET31_0 = m; break;          /* BULK_SET    */
+        case 1: GPIOA->DOUTCLR31_0 = m; break;          /* BULK_CLR    */
+        case 8: GPIOA->DOUTTGL31_0 = m; break;          /* BULK_TOGGLE */
+        case 2: /* DIRSET (output): an output can't also be an input IRQ */
+            GPIOA->CPU_INT.IMASK &= ~m;
             GPIOA->DOE31_0 |= m;
             break;
-        case 3: /* DIRCLR (input): restore input, re-arm button IRQ */
+        case 3: /* DIRCLR (input): re-arm the IRQ if this pin is armed */
             GPIOA->DOE31_0 &= ~m;
-            if (is_btn) { GPIOA->CPU_INT.ICLR = m; GPIOA->CPU_INT.IMASK |= m; }
+            if (irq_dio_mask & m) { GPIOA->CPU_INT.ICLR = m; GPIOA->CPU_INT.IMASK |= m; }
             break;
-        case 4: PINCM(sp_pincm[b]) |= PINCM_PIPU; break;/* PULLENSET */
-        case 5: PINCM(sp_pincm[b]) &= ~PINCM_PIPU; break;/* PULLENCLR */
+        case 4: if (pc) PINCM(pc) |= PINCM_PIPU;  break;/* PULLENSET   */
+        case 5: if (pc) PINCM(pc) &= ~PINCM_PIPU; break;/* PULLENCLR   */
+        case 6: /* INTENSET: arm a falling-edge interrupt on this pin   */
+            edge_set_falling(dio);
+            irq_dio_mask |= m;
+            GPIOA->CPU_INT.ICLR  = m;     /* drop any stale latch */
+            GPIOA->CPU_INT.IMASK |= m;
+            break;
+        case 7: /* INTENCLR: disarm */
+            GPIOA->CPU_INT.IMASK &= ~m;
+            irq_dio_mask &= ~m;
+            edge_clear(dio);
+            break;
         }
     }
 }
@@ -245,12 +290,15 @@ static void apply_write(uint8_t mod, uint8_t fn, volatile uint8_t *d, uint8_t n)
         if (n >= 1 && d[0] == 0xFF) system_reset();
     } else if (mod == MOD_GPIO) {
         switch (fn) {
-        case FN_BULK_SET:   gpio_apply(arg, 0); break;
-        case FN_BULK_CLR:   gpio_apply(arg, 1); break;
-        case FN_DIRSET:     gpio_apply(arg, 2); break;
-        case FN_DIRCLR:     gpio_apply(arg, 3); break;
-        case FN_PULLENSET:  gpio_apply(arg, 4); break;
-        case FN_PULLENCLR:  gpio_apply(arg, 5); break;
+        case FN_BULK_SET:    gpio_apply(arg, 0); break;
+        case FN_BULK_CLR:    gpio_apply(arg, 1); break;
+        case FN_BULK_TOGGLE: gpio_apply(arg, 8); break;
+        case FN_DIRSET:      gpio_apply(arg, 2); break;
+        case FN_DIRCLR:      gpio_apply(arg, 3); break;
+        case FN_PULLENSET:   gpio_apply(arg, 4); break;
+        case FN_PULLENCLR:   gpio_apply(arg, 5); break;
+        case FN_INTENSET:    gpio_apply(arg, 6); break;
+        case FN_INTENCLR:    gpio_apply(arg, 7); break;
         default: break;
         }
     }
@@ -320,17 +368,30 @@ void I2C1_IRQHandler(void) {
 }
 
 void GPIOA_IRQHandler(void) {
-    uint32_t ris = GPIOA->CPU_INT.RIS & BTN_MASK;
+    uint32_t ris = GPIOA->CPU_INT.RIS & irq_dio_mask;
     GPIOA->CPU_INT.ICLR = ris;
     if (!ris) return;
     for (int dio = 0; dio < 32; dio++) {
         if (!(ris & (1u << dio))) continue;
-        uint8_t idx = btn_dio_to_index(dio);   /* 0..5 = logical bit = event id */
-        if (idx == 0xFF) continue;
-        gpio_intflag |= (1u << idx);
-        evt_push(idx);
+        uint8_t b = dio_to_logbit(dio);        /* logical bit 0..16 = event id */
+        if (b == 0xFF) continue;
+        gpio_intflag |= (1u << b);
+        evt_push(b);
     }
     led_on();
+}
+
+/* ====================================================================== */
+/* FULL_POWER (PA16, logical bit 16): active-low enable to a current-limited */
+/* load switch, externally pulled UP = OFF at reset. Driving PA16 low turns  */
+/* the LCD/switched rail ON. Called last in main() so the rail's inrush is    */
+/* sequenced AFTER our power-on reset. Bit 16 stays in HOST_WRITABLE_MASK, so */
+/* the host can still drive it (e.g. BULK_SET = high = LCD off) over I2C.      */
+/* ====================================================================== */
+static void fullpower_on(void) {
+    GPIOA->DOUTCLR31_0 = FULLPWR_BIT;                       /* latch low first */
+    PINCM(FULLPWR_PINCM) = PINCM_PC | PINCM_INENA | PINCM_PF(PF_GPIO);
+    GPIOA->DOE31_0    |= FULLPWR_BIT;                       /* enable output -> drives low = ON */
 }
 
 /* ====================================================================== */
@@ -343,6 +404,8 @@ int main(void) {
     NVIC_enable(GPIOA_IRQn);
     NVIC_enable(I2C1_IRQn);
     enable_irq();
+
+    fullpower_on();   /* enable the LCD/switched rail last, fully booted */
 
     for (;;) { __wfi(); }
 }

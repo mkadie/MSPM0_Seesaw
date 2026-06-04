@@ -129,6 +129,29 @@ OPTIONS=0x07, SELFTEST=0x55, INTFLAG=0x3F, EVENT POP_ALL=[0xFE,0xED]. **SELFTEST
     inductor's saturation current exceeds the LCD's running current and its DCR drop on the
     LCD rail is acceptable.
 
+### Runtime-configurable GPIO + FULL_POWER on PA16 (2026-06-03)
+
+14. **FULL_POWER is now a seesaw pin.** The board's load switch has built-in current
+    limiting and its enable is on the seesaw's logical **bit 16 = PA16**, externally
+    **pulled up = OFF at reset** (active-low: drive low = on). The firmware drives PA16 low
+    in `fullpower_on()` as the **last** step of `main()` — after GPIO/I2C/IRQs are up — so
+    the LCD-rail inrush is sequenced *after* the MSPM0's own power-on reset. Bit 16 stays
+    host-writable, so the Fruit Jam can also toggle LCD power over I2C (BULK_SET bit 16 = off).
+    This + the current-limited switch + the §0.13 inductor together attack the POR problem
+    from three sides (sequence, current-limit, di/dt).
+15. **GPIO is now fully host-configurable at runtime (firmware VERSION `0x0002.0200`)** —
+    this implements §8.1-8.2. The GPIO module gained the standard Seesaw functions
+    **`INTENSET` (0x08)**, **`INTENCLR` (0x09)**, and **`BULK_TOGGLE` (0x07)**, joining the
+    existing DIRSET/CLR, BULK/SET/CLR, PULLENSET/CLR, INTFLAG. The hard-coded button mask is
+    gone from the interrupt path: a runtime `irq_dio_mask` (seeded to buttons 0..7 at boot)
+    is edited by INTENSET/INTENCLR, and the GPIOA ISR services **any** armed pin, pushing the
+    **logical bit (0..16)** into the EVENT FIFO. So the host decides each pin's role — a pin
+    becomes a "button" purely by arming its (falling-edge) interrupt, and pull/direction/output
+    work on every mapped pin. **Host API:** `INTENSET(mask)` arms falling-edge events on the
+    masked pins; `INTENCLR(mask)` disarms; events and `INTFLAG` report logical-bit positions;
+    everything else is stock `adafruit_seesaw`. **Needs on-hardware verification** of the new
+    INTEN path (boot-default button behaviour is unchanged and already validated).
+
 ---
 
 ## 1. Goals

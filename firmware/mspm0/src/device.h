@@ -91,4 +91,13 @@ static inline void enable_irq(void) { __asm__ volatile ("cpsie i"); }
 #define SP15_DIO 15   /* PA15, PINCM37 */
 #define SP16_DIO 16   /* PA16, PINCM38 */
 
+/* FULL_POWER enable lives on the spare "16" net (PA16). The board drives a
+ * current-limited load switch that is externally pulled UP = OFF at reset, so
+ * the LCD rail stays off through our power-on reset; firmware drives PA16 LOW
+ * (active-low enable) AFTER boot to turn it on — see fullpower_on() in main.c.
+ * Bit 16 stays host-writable so the host can still toggle LCD power over I2C. */
+#define FULLPWR_DIO   SP16_DIO
+#define FULLPWR_PINCM 38
+#define FULLPWR_BIT   (1U << 16)   /* PA16 */
+
 #endif /* DEVICE_H */
