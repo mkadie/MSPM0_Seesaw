@@ -403,3 +403,36 @@ and changes it live, with no re-flash. Concretely:
    3V3** rail (it now has a dedicated 600 mA regulator) and keep the MSPM0 **upstream of a
    series inductor** that isolates the LCD's switched rail, so the LCD inrush can't sag VDD
    through the MSPM0's power-on reset. Runtime config is useless if the chip browns out.
+
+---
+
+## 9. Resume checklist — next MSPM0 board (paused 2026-06-06)
+
+**Where we left off:** the alpha v3 daughterboard works standalone. The current board
+**boots cleanly with the PA18 / TOUCH_IRQ trace cut** (the BSL-pin bug, §0.16). Firmware is
+committed and verified (`VERSION 0x0002.0200`). Coming back to spin the revised PCB +
+matching firmware. Full detail is in §0 items 12–18 and §8; this is the short version.
+
+### Hardware — PCB revision (the must-dos)
+- [ ] **TOUCH_IRQ: PA18 → PB17** (PB17 = A1_4, keeps analog). PA18 is the **BSL invoke pin** — that was the bug.
+- [ ] **LED: PA10 → PB6** (frees PA10/PA11 = ROM BSL UART).
+- [ ] **TOUCH_CS: stays PA12** (harmless).
+- [ ] **PA18:** pull-down to GND **and/or** disable the GPIO BSL-invoke in NONMAIN — never leave the invoke pin floating.
+- [ ] Confirm **NEOPIX** and **LCD_CS / DC / RESET_LCD** are NOT on PA19/PA20 (SWD), PA10/PA11 (BSL UART), or RST_N.
+- [ ] **PA5/PA6 (HFXIN/HFXOUT):** leave for a crystal or tie off — no power-on-driven I/O on crystal pins.
+- [x] FULL_POWER on PA16 (active-low, current-limited switch) — **validated** (backlight toggles; §0.14, `bltest.c`).
+- Note: the LCD-vs-seesaw failure was the **BSL pin**, not power inrush. The seesaw has its own 600 mA 3V3 reg; the 1.5 mH series-inductor (§0.13) is now *optional* insurance, not required.
+
+### Firmware — when the revised board exists
+- [ ] **Add GPIOB support** (§0.18). Firmware is **GPIOA-only** today (PB2/PB3 work via the I2C *peripheral* through the IOMUX, not the GPIOB GPIO block, which is unpowered). Need to: power GPIOB; put the **LED on PB6**; read **TOUCH_IRQ on PB17**; and to expose the touch IRQ to the host, extend the logical-bit map + bulk-read / INTEN / IRQ to span **both** GPIOA and GPIOB.
+- [x] Runtime-config GPIO (`INTENSET`/`INTENCLR`/`BULK_TOGGLE`), `HW_ID 0x84`, EVENT FIFO, FULL_POWER-on-PA16 — **done & verified** (`firmware/mspm0/src/main.c`).
+
+### Already verified — don't re-test
+- Seesaw identity (`0x49`, `HW_ID 0x84`, `VERSION 0x0002.0200`), SELFTEST event path (`0xfe,0xed`), button pull-ups clean (`b0..b7=11111111`), host INTEN config path builds.
+- FULL_POWER / LCD backlight control via PA16.
+
+### Where things live / gotchas
+- **MSPM0 firmware + these docs:** repo **`mkadie/MSPM0_Seesaw`**. Working copy: `~/claude/FruitJamMSPM0Programmer/firmware/mspm0/`.
+- **Tools:** `bltest.c` (backlight toggle test), `flash.sh` + `swd_connect_test.sh` (XDS110/TC2030). A **manual single DSLite flash** is more reliable than `flash.sh`'s retry loop.
+- **AAC host integration** (seesaw_buttons input, `audio_output_default`, English audio) lives on the Fruit Jam + host snapshot `~/claude/coder/talker_v3/` — **not** in this repo.
+- **Gotcha:** capturing Fruit Jam serial with a Ctrl-C reboot can hang the seesaw I2C mid-transaction; reset the seesaw (xds110) or power-cycle to recover.
