@@ -152,6 +152,44 @@ OPTIONS=0x07, SELFTEST=0x55, INTFLAG=0x3F, EVENT POP_ALL=[0xFE,0xED]. **SELFTEST
     everything else is stock `adafruit_seesaw`. **Needs on-hardware verification** of the new
     INTEN path (boot-default button behaviour is unchanged and already validated).
 
+### TOUCH_IRQ on the BSL invoke pin — root cause + next-board pin plan (2026-06-05)
+
+16. **The "SPI touch screen present at power-on → seesaw won't boot" bug was the BSL pin.**
+    `TOUCH_IRQ` is routed to the seesaw **"11" net = PA18**, which is the **MSPM0 ROM-BSL
+    GPIO-invoke pin** (`TOUCH_CS` is on "12" = PA12/CAN_TX, which is harmless). The touch
+    controller's IRQ pull-up holds **PA18 high at power-on**, so the ROM samples the invoke
+    pin high during reset and jumps into the **bootloader instead of the application** — the
+    seesaw never runs, the LCD never gets powered. Only happens at power-on (PA18 is sampled
+    during reset); hot-plugging the touch after boot, or using a non-touch screen, works. The
+    Fruit Jam is irrelevant (TOUCH_IRQ goes straight to the MSPM0).
+    - **Confirmed by reading NONMAIN BOOTCFG over SWD** (`0x41C00100`): the GPIO-invoke field
+      = `0x12` (DIO 18 = PA18), active-high; BSL I2C address field = `0x0048` (sanity check).
+    - **Current-hardware workaround (in place):** the PA18 / "11" / TOUCH_IRQ trace was cut →
+      boots cleanly. (Touch IRQ unavailable for now; seesaw + LCD work.)
+
+17. **Next-board pin plan (when the revised PCB is made):**
+    - **TOUCH_IRQ: PA18 → PB17** (also `A1_4`, keeps analog capability; not a boot/SWD/BSL pin).
+    - **LED: PA10 → PB6** (frees PA10/PA11 = the ROM **BSL UART**, regaining UART-BSL recovery).
+    - **TOUCH_CS stays on PA12** (fine).
+    - **PA18 (the freed BSL invoke pin):** do **not** leave it floating — add a **pull-down to
+      GND** (invoke is active-high) and/or **disable the GPIO invoke in NONMAIN** (BOOTCFG), so
+      a stray high can never strand a unit in the bootloader.
+    - **Sanity-check** that NEOPIX and the LCD control lines (LCD_CS / DC / RESET_LCD) don't
+      land on any MSPM0 boot-critical pin — **PA19 (SWDIO), PA20 (SWCLK), PA10/PA11 (BSL UART),
+      RST_N**. (They likely run Fruit-Jam→LCD only, but confirm.)
+    - PA5/PA6 (HFXIN/HFXOUT) are unused/unconnected — leave them for a crystal or tie off;
+      don't route power-on-driven I/O to crystal pins.
+
+18. **Firmware TODO for the new board — add GPIOB GPIO support.** The firmware is currently
+    **GPIOA-only**: `gpio_init()` powers `GPIOA` and all GPIO logic uses `GPIOA->DOUT/DIN/DOE`.
+    Note PB2/PB3 (I2C) work via the **I2C peripheral routed through the IOMUX**, *not* the GPIOB
+    GPIO block — so GPIOB is presently unpowered. Moving LED→PB6 and TOUCH_IRQ→PB17 requires:
+    - Power up GPIOB (`GPIOB->GPRCM.RSTCTL/PWREN`).
+    - **LED on PB6:** PINCM → GPIO output; drive `GPIOB->DOUTSET/CLR` + `DOE`. (Simple.)
+    - **TOUCH_IRQ on PB17:** PINCM → GPIO input; to expose it to the host over I2C, extend the
+      logical-bit map and the bulk-read / INTEN / IRQ paths to span **both** GPIOA and GPIOB
+      (today `gpio_bulk_read()` reads only `GPIOA->DIN31_0`, and there's one `GPIOA_IRQHandler`).
+
 ---
 
 ## 1. Goals
